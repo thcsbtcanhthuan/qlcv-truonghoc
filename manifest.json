@@ -1,0 +1,17 @@
+{
+  "name": "Cổng Cán Bộ & Phòng Ban Xử Lý Công Văn",
+  "short_name": "QLCV Số",
+  "description": "Cổng nhận lệnh và phản hồi xử lý Công văn Số (PWA Offline + Cloud 24/7)",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#1e3a8a",
+  "icons": [
+    {
+      "src": "./app_icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
