@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
@@ -199,7 +199,510 @@
 
   <div id="staffToast" class="toast"></div>
 
-  <script src="js/staff.js?v=20261123_online"></script>
+  <script>
+/**
+ * CỔNG PHÒNG BAN & CÁN BỘ XỬ LÝ CÔNG VĂN (PWA OFFLINE-FIRST + HYBRID LAN & FIREBASE CLOUD)
+ * - Tự nhận diện chạy trên mạng LAN cơ quan (http://IP:8055) hoặc Internet 24/7 (Firebase Firestore)
+ * - Khi MẤT MẠNG: vẫn xem được toàn bộ văn bản đã tải, gõ phản hồi & kéo tiến độ -> lưu vào Outbox Queue
+ * - Khi CÓ MẠNG TRỞ LẠI: tự động đẩy toàn bộ phản hồi trong Outbox Queue về Lãnh đạo ngay lập tức!
+ */
+
+(function () {
+  // Cấu hình Firebase độc lập cho riêng hệ thống QLCV (tách biệt hoàn toàn khỏi EDUSTO)
+  const FIREBASE_PROJECT = 'qlcv-truonghoc';
+  const FIREBASE_API_KEY = 'AIzaSyCjguQAmgsNCKjevtrTiYHKDc_OgduV-t8';
+  const FS_BASE = FIREBASE_PROJECT
+    ? `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT}/databases/(default)/documents`
+    : '';
+  const CACHE_STAFF_KEY = 'qlcv_staff_cache_directory';
+  const CACHE_DOCS_KEY = 'qlcv_staff_cache_docs';
+  const SESSION_KEY = 'qlcv_staff_session';
+  const OUTBOX_KEY = 'qlcv_staff_outbox';
+
+  const state = {
+    staffList: [],
+    docs: [],
+    currentUser: null,
+    isLanServer: false,
+    filter: 'ACTIVE'
+  };
+
+  const el = {
+    netStatusPill: document.getElementById('netStatusPill'),
+    btnStaffSync: document.getElementById('btnStaffSync'),
+    btnStaffLogout: document.getElementById('btnStaffLogout'),
+    outboxBanner: document.getElementById('outboxBanner'),
+    outboxText: document.getElementById('outboxText'),
+    btnFlushOutbox: document.getElementById('btnFlushOutbox'),
+    loginSection: document.getElementById('loginSection'),
+    selLoginStaff: document.getElementById('selLoginStaff'),
+    inpLoginPin: document.getElementById('inpLoginPin'),
+    btnLoginSubmit: document.getElementById('btnLoginSubmit'),
+    workspaceSection: document.getElementById('workspaceSection'),
+    lblCurrentStaffName: document.getElementById('lblCurrentStaffName'),
+    lblCurrentStaffDept: document.getElementById('lblCurrentStaffDept'),
+    selTaskFilter: document.getElementById('selTaskFilter'),
+    tasksContainer: document.getElementById('tasksContainer'),
+    toast: document.getElementById('staffToast')
+  };
+
+  function showToast(msg) {
+    el.toast.textContent = msg;
+    el.toast.style.display = 'block';
+    clearTimeout(window.__stToast);
+    window.__stToast = setTimeout(() => { el.toast.style.display = 'none'; }, 3500);
+  }
+
+  function escapeHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function nowStr() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function loadOutbox() {
+    try { return JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]'); } catch { return []; }
+  }
+
+  function saveOutbox(arr) {
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify(arr));
+    updateOutboxBanner();
+  }
+
+  function updateOutboxBanner() {
+    const q = loadOutbox();
+    if (q.length > 0) {
+      el.outboxBanner.style.display = 'flex';
+      el.outboxText.textContent = `🟡 Đang lưu tạm Offline ${q.length} lệnh phản hồi — sẽ tự động gửi ngay khi có mạng!`;
+    } else {
+      el.outboxBanner.style.display = 'none';
+    }
+  }
+
+  function updateNetPill(online, modeLabel = '') {
+    if (online) {
+      el.netStatusPill.className = 'net-pill online';
+      el.netStatusPill.textContent = modeLabel || (state.isLanServer ? '🟢 LAN + Cloud Sẵn sàng' : '🟢 Online Cloud 24/7');
+    } else {
+      el.netStatusPill.className = 'net-pill offline';
+      el.netStatusPill.textContent = '🟡 Offline (Chạy ngầm bộ nhớ máy)';
+    }
+  }
+
+  function updateLanNavVisibility() {
+    document.querySelectorAll('.lan-only-nav').forEach(node => {
+      node.style.display = state.isLanServer ? '' : 'none';
+    });
+  }
+
+  async function detectLanServer() {
+    try {
+      const resp = await fetch('/api/staff', { cache: 'no-store' });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data.staff)) {
+          state.isLanServer = true;
+          state.staffList = data.staff;
+          localStorage.setItem(CACHE_STAFF_KEY, JSON.stringify(data.staff));
+          updateLanNavVisibility();
+          return true;
+        }
+      }
+    } catch (_) {}
+    state.isLanServer = false;
+    updateLanNavVisibility();
+    return false;
+  }
+
+  async function loadStaffDirectory() {
+    const lanOk = await detectLanServer();
+    if (lanOk) {
+      updateNetPill(true, '🟢 Mạng cơ quan (LAN)');
+      populateStaffDropdown();
+      return;
+    }
+    // Thử tải từ Firebase Firestore khi truy cập qua Internet 24/7
+    try {
+      const r = await fetch(`${FS_BASE}/qlcv_staff/directory?key=${FIREBASE_API_KEY}`, { cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json();
+        const p = j?.fields?.payload_json?.stringValue;
+        if (p) {
+          const parsed = JSON.parse(p);
+          if (Array.isArray(parsed.staff)) {
+            state.staffList = parsed.staff;
+            localStorage.setItem(CACHE_STAFF_KEY, JSON.stringify(parsed.staff));
+            updateNetPill(true, '🟢 Online Cloud 24/7');
+            populateStaffDropdown();
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // Fallback Offline 100% từ Cache cục bộ
+    try {
+      state.staffList = JSON.parse(localStorage.getItem(CACHE_STAFF_KEY) || '[]');
+    } catch { state.staffList = []; }
+    updateNetPill(false);
+    populateStaffDropdown();
+  }
+
+  function populateStaffDropdown() {
+    if (!state.staffList.length) {
+      el.selLoginStaff.innerHTML = '<option value="">Chưa có dữ liệu cán bộ (cần kết nối mạng lần đầu)</option>';
+      return;
+    }
+    el.selLoginStaff.innerHTML = '<option value="">-- Chọn Phòng ban / Cán bộ --</option>' +
+      state.staffList.filter(s => s.active !== false).map(s =>
+        `<option value="${escapeHtml(s.id)}">${escapeHtml(s.department)} — ${escapeHtml(s.name)}</option>`
+      ).join('');
+  }
+
+  async function loadAssignedDocs() {
+    let fetched = null;
+    if (state.isLanServer) {
+      try {
+        const r = await fetch('/api/documents', { cache: 'no-store' });
+        if (r.ok) {
+          const d = await r.json();
+          fetched = d.documents || [];
+          updateNetPill(true, '🟢 Mạng cơ quan (LAN)');
+        }
+      } catch (_) {}
+    }
+
+    if (!fetched) {
+      try {
+        const r = await fetch(`${FS_BASE}/qlcv_documents?pageSize=300&key=${FIREBASE_API_KEY}`, { cache: 'no-store' });
+        if (r.ok) {
+          const j = await r.json();
+          fetched = [];
+          (j.documents || []).forEach(item => {
+            const p = item?.fields?.payload_json?.stringValue;
+            if (p) {
+              try { fetched.push(JSON.parse(p)); } catch (_) {}
+            }
+          });
+          updateNetPill(true, '🟢 Online Cloud 24/7');
+        }
+      } catch (_) {}
+    }
+
+    if (fetched) {
+      state.docs = fetched;
+      localStorage.setItem(CACHE_DOCS_KEY, JSON.stringify(fetched));
+    } else {
+      try { state.docs = JSON.parse(localStorage.getItem(CACHE_DOCS_KEY) || '[]'); } catch { state.docs = []; }
+      updateNetPill(false);
+    }
+
+    renderTasks();
+  }
+
+  async function pushSingleUpdateToServerOrCloud(job) {
+    // 1. Nếu đang ở mạng LAN cơ quan -> gửi thẳng về Python Server :8055
+    if (state.isLanServer) {
+      const r = await fetch('/api/routing/staff-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(job)
+      });
+      if (r.ok) return true;
+    }
+
+    // 2. Gửi trực tiếp lên Firebase Firestore (hoạt động 24/7 ở mọi nơi!)
+    const getResp = await fetch(`${FS_BASE}/qlcv_documents/${encodeURIComponent(job.doc_id)}?key=${FIREBASE_API_KEY}`, { cache: 'no-store' });
+    if (!getResp.ok) throw new Error('Không tải được văn bản trên Cloud');
+    const fsObj = await getResp.json();
+    const doc = JSON.parse(fsObj?.fields?.payload_json?.stringValue || '{}');
+    const assigns = doc?.routing?.assignments || [];
+    const target = assigns.find(a => a.assign_id === job.assign_id);
+    if (!target || target.status === 'recalled') return true;
+
+    const ts = job.time || nowStr();
+    target.status = job.status;
+    target.progress_pct = job.status === 'submitted' ? 100 : Number(job.progress_pct || 0);
+    target.updated_at = ts;
+    target.responses = target.responses || [];
+    if (job.message) {
+      target.responses.push({
+        time: ts,
+        by: target.staff_name || job.staff_name || 'Cán bộ',
+        role_type: 'staff',
+        message: job.message,
+        attachment_name: job.attachment_name || ''
+      });
+    }
+    doc.updated_at = ts;
+
+    const patchResp = await fetch(`${FS_BASE}/qlcv_documents/${encodeURIComponent(job.doc_id)}?key=${FIREBASE_API_KEY}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          payload_json: { stringValue: JSON.stringify(doc) },
+          updated_at: { stringValue: ts }
+        }
+      })
+    });
+    if (!patchResp.ok) throw new Error('Ghi Cloud thất bại');
+    return true;
+  }
+
+  async function flushOutbox(silent = false) {
+    const q = loadOutbox();
+    if (!q.length) return;
+    const remaining = [];
+    let sent = 0;
+    for (const job of q) {
+      try {
+        await pushSingleUpdateToServerOrCloud(job);
+        sent++;
+      } catch (_) {
+        remaining.push(job);
+      }
+    }
+    saveOutbox(remaining);
+    if (sent > 0) {
+      updateNetPill(true);
+      if (!silent) showToast(`✅ Đã tự động đồng bộ ${sent} phản hồi từ Hàng đợi Offline về Lãnh đạo!`);
+      await loadAssignedDocs();
+    } else if (!silent && remaining.length > 0) {
+      updateNetPill(false);
+      showToast('🟡 Chưa có mạng — các phản hồi vẫn được giữ an toàn trong Hàng đợi Offline.');
+    }
+  }
+
+  async function submitStaffAction(docId, assignId, status, progressPct, message) {
+    const job = {
+      doc_id: docId,
+      assign_id: assignId,
+      staff_id: state.currentUser.id,
+      staff_name: state.currentUser.name,
+      status: status,
+      progress_pct: Number(progressPct || 0),
+      message: (message || '').trim(),
+      time: nowStr()
+    };
+
+    // Cập nhật ngay trên giao diện cục bộ (Optimistic Offline-First)
+    const localDoc = state.docs.find(d => d.id === docId);
+    if (localDoc && localDoc.routing && localDoc.routing.assignments) {
+      const a = localDoc.routing.assignments.find(x => x.assign_id === assignId);
+      if (a) {
+        a.status = status;
+        a.progress_pct = status === 'submitted' ? 100 : job.progress_pct;
+        a.updated_at = job.time;
+        if (job.message) {
+          a.responses = a.responses || [];
+          a.responses.push({ time: job.time, by: state.currentUser.name, role_type: 'staff', message: job.message });
+        }
+        localStorage.setItem(CACHE_DOCS_KEY, JSON.stringify(state.docs));
+        renderTasks();
+      }
+    }
+
+    try {
+      await pushSingleUpdateToServerOrCloud(job);
+      showToast('✅ Đã gửi cập nhật & phản hồi về Lãnh đạo thành công!');
+      await loadAssignedDocs();
+    } catch (_) {
+      // Mất mạng -> Đưa vào Hàng đợi Offline để tự động gửi ngay khi có mạng!
+      const q = loadOutbox();
+      q.push(job);
+      saveOutbox(q);
+      updateNetPill(false);
+      showToast('🟡 Đang mất mạng: Đã lưu tạm vào Hàng đợi Offline — sẽ tự gửi ngay khi có mạng!');
+    }
+  }
+
+  function renderTasks() {
+    if (!state.currentUser) return;
+    const myTasks = [];
+    for (const doc of state.docs) {
+      const assigns = (doc.routing && doc.routing.assignments) || [];
+      for (const a of assigns) {
+        if (a.staff_id === state.currentUser.id && a.status !== 'recalled') {
+          if (state.filter === 'ACTIVE' && a.status === 'approved') continue;
+          if (state.filter === 'APPROVED' && a.status !== 'approved') continue;
+          myTasks.push({ doc, assign: a });
+        }
+      }
+    }
+
+    if (!myTasks.length) {
+      el.tasksContainer.innerHTML = `
+        <div style="background:#fff; border:1px solid #e2e8f0; border-radius:12px; padding:2rem; text-align:center; color:#64748b;">
+          <div style="font-size:2rem; margin-bottom:0.4rem;">📭</div>
+          <strong>Hiện chưa có văn bản nào trong mục này</strong>
+          <p style="font-size:0.82rem; margin-top:0.3rem;">Khi Lãnh đạo chuyển văn bản xử lý, hệ thống sẽ tự động hiển thị tại đây.</p>
+        </div>`;
+      return;
+    }
+
+    const stLabelMap = {
+      sent: '📩 Mới giao (Chưa xác nhận)',
+      seen: '👀 Đã tiếp nhận',
+      in_progress: '⚙️ Đang xử lý',
+      submitted: '📨 Đã gửi báo cáo (Chờ duyệt)',
+      approved: '✅ Lãnh đạo đã duyệt xong',
+      returned: '🔄 Lãnh đạo yêu cầu bổ sung'
+    };
+
+    el.tasksContainer.innerHTML = myTasks.map(({ doc, assign }) => {
+      const isLead = assign.role === 'lead';
+      const isLocked = assign.status === 'approved';
+      const responses = assign.responses || [];
+      const previewHref = state.isLanServer ? `/api/preview?id=${encodeURIComponent(doc.id)}` : (doc.drive_link || '');
+
+      return `
+        <article class="task-card ${isLead ? 'role-lead' : ''} status-${assign.status}">
+          <div class="task-meta-row">
+            <span class="pill ${isLead ? 'pill-lead' : 'pill-co'}">${isLead ? '★ CHỦ TRÌ XỬ LÝ' : '🤝 PHỐI HỢP'}</span>
+            <span class="pill pill-num">Số: ${escapeHtml(doc.doc_number || 'Chưa rõ số')}</span>
+            ${assign.deadline ? `<span class="pill pill-deadline">⏰ Hạn: ${escapeHtml(assign.deadline)}</span>` : ''}
+            <span class="pill pill-status">${stLabelMap[assign.status] || assign.status} (${assign.progress_pct || 0}%)</span>
+          </div>
+
+          <div class="task-title">${escapeHtml(doc.abstract || doc.filename || 'Văn bản hành chính')}</div>
+          <div style="font-size:0.78rem; color:#475569; margin-bottom:0.4rem;">
+            🏛️ Cơ quan ban hành: <strong>${escapeHtml(doc.authority || '')}</strong> • Ngày: ${escapeHtml(doc.doc_date || '')}
+          </div>
+
+          <div class="directive-box">
+            <strong>🖋️ Bút phê / Yêu cầu chỉ đạo của Lãnh đạo:</strong><br>
+            ${escapeHtml(assign.directive || 'Thực hiện theo nội dung văn bản.')}
+          </div>
+
+          ${doc.summary ? `<div class="summary-box"><strong>📋 Tóm tắt nội dung:</strong><br>${escapeHtml(doc.summary).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>')}</div>` : ''}
+
+          ${responses.length ? `
+            <div class="response-history">
+              <strong style="font-size:0.76rem; color:#475569;">💬 Trao đổi &amp; Phản hồi (${responses.length}):</strong>
+              ${responses.map(r => `
+                <div class="resp-item ${r.role_type === 'leader' ? 'resp-leader' : 'resp-staff'}">
+                  <strong>${escapeHtml(r.by)}</strong> <span style="opacity:0.7; font-size:0.72rem;">(${escapeHtml(r.time)})</span>: ${escapeHtml(r.message)}
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+
+          <div class="staff-action-panel">
+            ${previewHref ? `<div><a href="${escapeHtml(previewHref)}" target="_blank" rel="noopener" class="btn btn-outline" style="text-decoration:none; font-size:0.78rem;">📄 Mở xem tệp văn bản gốc ↗</a></div>` : ''}
+            ${!isLocked ? `
+              <div class="progress-row">
+                <span>Tiến độ: <strong id="pctLbl_${assign.assign_id}">${assign.progress_pct || 0}%</strong></span>
+                <input type="range" id="pctRange_${assign.assign_id}" min="0" max="100" step="10" value="${assign.progress_pct || 0}"
+                  oninput="document.getElementById('pctLbl_${assign.assign_id}').textContent = this.value + '%'">
+              </div>
+              <textarea id="msgBox_${assign.assign_id}" class="form-control" rows="2" placeholder="Nhập báo cáo tiến độ, kết quả xử lý hoặc đề xuất gửi về Lãnh đạo..."></textarea>
+              <div class="btn-row">
+                ${assign.status === 'sent' ? `<button type="button" class="btn btn-outline btn-mark-seen" data-doc="${doc.id}" data-asg="${assign.assign_id}">👀 Xác nhận đã nhận</button>` : ''}
+                <button type="button" class="btn btn-primary btn-send-progress" data-doc="${doc.id}" data-asg="${assign.assign_id}">📨 Cập nhật Tiến độ &amp; Phản hồi</button>
+                <button type="button" class="btn btn-success btn-submit-done" data-doc="${doc.id}" data-asg="${assign.assign_id}">✅ Báo cáo Hoàn thành (100%)</button>
+              </div>
+            ` : `<div style="font-size:0.8rem; color:#15803d; font-weight:700;">✅ Nhiệm vụ này đã được Lãnh đạo duyệt hoàn thành.</div>`}
+          </div>
+        </article>
+      `;
+    }).join('');
+  }
+
+  function showWorkspace(user) {
+    state.currentUser = user;
+    localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+    el.loginSection.style.display = 'none';
+    el.workspaceSection.style.display = 'block';
+    el.btnStaffLogout.style.display = 'inline-flex';
+    el.lblCurrentStaffName.textContent = `👤 ${user.name}`;
+    el.lblCurrentStaffDept.textContent = `${user.department} • ${user.role_title || 'Cán bộ xử lý'}`;
+    loadAssignedDocs();
+  }
+
+  // Events
+  el.btnLoginSubmit.addEventListener('click', () => {
+    const sid = el.selLoginStaff.value;
+    const pin = el.inpLoginPin.value.trim();
+    if (!sid) return showToast('Vui lòng chọn Phòng ban / Cán bộ!');
+    const found = state.staffList.find(s => s.id === sid);
+    if (!found) return showToast('Không tìm thấy thông tin cán bộ!');
+    if (String(found.pin || '1234') !== pin) return showToast('❌ Mã PIN chưa chính xác!');
+    showWorkspace(found);
+  });
+
+  el.btnStaffLogout.addEventListener('click', () => {
+    localStorage.removeItem(SESSION_KEY);
+    state.currentUser = null;
+    el.workspaceSection.style.display = 'none';
+    el.loginSection.style.display = 'block';
+    el.btnStaffLogout.style.display = 'none';
+    el.inpLoginPin.value = '';
+  });
+
+  el.selTaskFilter.addEventListener('change', (e) => {
+    state.filter = e.target.value;
+    renderTasks();
+  });
+
+  el.btnStaffSync.addEventListener('click', async () => {
+    await flushOutbox(false);
+    await loadStaffDirectory();
+    if (state.currentUser) await loadAssignedDocs();
+    showToast('🔄 Đã đồng bộ dữ liệu mới nhất!');
+  });
+
+  el.btnFlushOutbox.addEventListener('click', () => flushOutbox(false));
+
+  el.tasksContainer.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const docId = btn.getAttribute('data-doc');
+    const asgId = btn.getAttribute('data-asg');
+    if (!docId || !asgId) return;
+    const pct = document.getElementById(`pctRange_${asgId}`)?.value || 0;
+    const msg = document.getElementById(`msgBox_${asgId}`)?.value || '';
+
+    if (btn.classList.contains('btn-mark-seen')) {
+      submitStaffAction(docId, asgId, 'seen', Math.max(10, Number(pct)), msg || 'Đã tiếp nhận văn bản và đang triển khai.');
+    } else if (btn.classList.contains('btn-send-progress')) {
+      submitStaffAction(docId, asgId, 'in_progress', Math.max(10, Number(pct)), msg || `Cập nhật tiến độ xử lý: ${pct}%.`);
+    } else if (btn.classList.contains('btn-submit-done')) {
+      submitStaffAction(docId, asgId, 'submitted', 100, msg || 'Đã hoàn thành xử lý văn bản, kính trình Lãnh đạo duyệt.');
+    }
+  });
+
+  // Tự động đẩy Hàng đợi Offline ngay khi điện thoại / máy tính có mạng lại!
+  window.addEventListener('online', () => {
+    updateNetPill(true);
+    flushOutbox(false);
+  });
+  window.addEventListener('offline', () => updateNetPill(false));
+
+  // Tự kiểm tra đồng bộ định kỳ mỗi 15 giây
+  setInterval(() => {
+    if (navigator.onLine) {
+      flushOutbox(true);
+      if (state.currentUser) loadAssignedDocs();
+    }
+  }, 15000);
+
+  // Khởi động
+  (async function boot() {
+    updateOutboxBanner();
+    await loadStaffDirectory();
+    try {
+      const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+      if (saved && saved.id) showWorkspace(saved);
+    } catch (_) {}
+    if (navigator.onLine) flushOutbox(true);
+  })();
+})();
+
+</script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
@@ -209,3 +712,4 @@
   </script>
 </body>
 </html>
+
