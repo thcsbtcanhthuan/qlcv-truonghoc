@@ -224,8 +224,17 @@
     docs: [],
     currentUser: null,
     isLanServer: false,
-    filter: 'ACTIVE'
+    filter: 'ACTIVE',
+    drafts: {}
   };
+
+  function isUserEditingTasks() {
+    const active = document.activeElement;
+    if (active && el.tasksContainer && el.tasksContainer.contains(active) && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT')) {
+      return true;
+    }
+    return Object.values(state.drafts).some(d => d && ((d.message && d.message.trim().length > 0) || d.attachment_name));
+  }
 
   const el = {
     netStatusPill: document.getElementById('netStatusPill'),
@@ -428,14 +437,16 @@
     target.progress_pct = job.status === 'submitted' ? 100 : Number(job.progress_pct || 0);
     target.updated_at = ts;
     target.responses = target.responses || [];
-    if (job.message) {
-      target.responses.push({
+    if (job.message || job.attachment_name) {
+      const respObj = {
         time: ts,
         by: target.staff_name || job.staff_name || 'Cán bộ',
         role_type: 'staff',
-        message: job.message,
+        message: job.message || 'Đã gửi tệp báo cáo kết quả xử lý.',
         attachment_name: job.attachment_name || ''
-      });
+      };
+      if (job.attachment_data) respObj.attachment_data = job.attachment_data;
+      target.responses.push(respObj);
     }
     doc.updated_at = ts;
 
@@ -478,6 +489,7 @@
   }
 
   async function submitStaffAction(docId, assignId, status, progressPct, message) {
+    const draft = state.drafts[assignId] || {};
     const job = {
       doc_id: docId,
       assign_id: assignId,
@@ -486,8 +498,13 @@
       status: status,
       progress_pct: Number(progressPct || 0),
       message: (message || '').trim(),
+      attachment_name: draft.attachment_name || '',
+      attachment_data: draft.attachment_data || '',
       time: nowStr()
     };
+
+    // Xóa bản nháp sau khi người dùng đã bấm gửi
+    delete state.drafts[assignId];
 
     // Cập nhật ngay trên giao diện cục bộ (Optimistic Offline-First)
     const localDoc = state.docs.find(d => d.id === docId);
@@ -497,9 +514,17 @@
         a.status = status;
         a.progress_pct = status === 'submitted' ? 100 : job.progress_pct;
         a.updated_at = job.time;
-        if (job.message) {
+        if (job.message || job.attachment_name) {
           a.responses = a.responses || [];
-          a.responses.push({ time: job.time, by: state.currentUser.name, role_type: 'staff', message: job.message });
+          const rObj = {
+            time: job.time,
+            by: state.currentUser.name,
+            role_type: 'staff',
+            message: job.message || 'Đã gửi tệp báo cáo kết quả xử lý.',
+            attachment_name: job.attachment_name || ''
+          };
+          if (job.attachment_data) rObj.attachment_data = job.attachment_data;
+          a.responses.push(rObj);
         }
         localStorage.setItem(CACHE_DOCS_KEY, JSON.stringify(state.docs));
         renderTasks();
@@ -586,6 +611,10 @@
               ${responses.map(r => `
                 <div class="resp-item ${r.role_type === 'leader' ? 'resp-leader' : 'resp-staff'}">
                   <strong>${escapeHtml(r.by)}</strong> <span style="opacity:0.7; font-size:0.72rem;">(${escapeHtml(r.time)})</span>: ${escapeHtml(r.message)}
+                  ${r.attachment_name ? (r.attachment_data
+                    ? `<div style="margin-top:0.28rem;"><a href="${r.attachment_data}" download="${escapeHtml(r.attachment_name)}" style="display:inline-flex; align-items:center; gap:4px; background:#0284c7; color:#fff; text-decoration:none; padding:2px 8px; border-radius:5px; font-size:0.72rem; font-weight:700;">📎 Tải File Báo cáo: ${escapeHtml(r.attachment_name)}</a></div>`
+                    : `<div style="margin-top:0.2rem; font-weight:700; color:#0369a1;">📎 Đính kèm: ${escapeHtml(r.attachment_name)}</div>`
+                  ) : ''}
                 </div>
               `).join('')}
             </div>
@@ -593,19 +622,34 @@
 
           <div class="staff-action-panel">
             ${previewHref ? `<div><a href="${escapeHtml(previewHref)}" target="_blank" rel="noopener" class="btn btn-outline" style="text-decoration:none; font-size:0.78rem;">📄 Mở xem tệp văn bản gốc ↗</a></div>` : ''}
-            ${!isLocked ? `
+            ${!isLocked ? (() => {
+              const dr = state.drafts[assign.assign_id] || {};
+              const curPct = dr.progress_pct != null ? dr.progress_pct : (assign.progress_pct || 0);
+              const curMsg = dr.message || '';
+              const attLabel = dr.attachment_name ? `📎 ${escapeHtml(dr.attachment_name)} (${escapeHtml(dr.attachment_size || '')})` : '';
+              return `
               <div class="progress-row">
-                <span>Tiến độ: <strong id="pctLbl_${assign.assign_id}">${assign.progress_pct || 0}%</strong></span>
-                <input type="range" id="pctRange_${assign.assign_id}" min="0" max="100" step="10" value="${assign.progress_pct || 0}"
+                <span>Tiến độ: <strong id="pctLbl_${assign.assign_id}">${curPct}%</strong></span>
+                <input type="range" id="pctRange_${assign.assign_id}" class="draft-range" data-asg="${assign.assign_id}" min="0" max="100" step="10" value="${curPct}"
                   oninput="document.getElementById('pctLbl_${assign.assign_id}').textContent = this.value + '%'">
               </div>
-              <textarea id="msgBox_${assign.assign_id}" class="form-control" rows="2" placeholder="Nhập báo cáo tiến độ, kết quả xử lý hoặc đề xuất gửi về Lãnh đạo..."></textarea>
+              <textarea id="msgBox_${assign.assign_id}" class="form-control draft-msg" data-asg="${assign.assign_id}" rows="2" placeholder="Nhập báo cáo tiến độ, kết quả xử lý hoặc đề xuất gửi về Lãnh đạo...">${escapeHtml(curMsg)}</textarea>
+              <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                <label class="btn btn-outline" style="font-size:0.77rem; padding:0.35rem 0.7rem; color:#0369a1; border-color:#7dd3fc; background:#f0f9ff; cursor:pointer;">
+                  📎 Đính kèm File Báo cáo (PDF, Word, Excel, Ảnh)
+                  <input type="file" class="draft-file-input" data-asg="${assign.assign_id}" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.webp" style="display:none;">
+                </label>
+                <span id="attChip_${assign.assign_id}" style="font-size:0.76rem; color:#0f766e; font-weight:700; display:${attLabel ? 'inline-flex' : 'none'}; align-items:center; gap:5px; background:#ecfdf5; border:1px solid #6ee7b7; padding:3px 8px; border-radius:6px;">
+                  <span id="attName_${assign.assign_id}">${attLabel}</span>
+                  <button type="button" class="btn-clear-att" data-asg="${assign.assign_id}" style="border:none; background:none; color:#dc2626; font-weight:800; cursor:pointer; padding:0 2px;" title="Gỡ tệp đính kèm">✕</button>
+                </span>
+              </div>
               <div class="btn-row">
                 ${assign.status === 'sent' ? `<button type="button" class="btn btn-outline btn-mark-seen" data-doc="${doc.id}" data-asg="${assign.assign_id}">👀 Xác nhận đã nhận</button>` : ''}
                 <button type="button" class="btn btn-primary btn-send-progress" data-doc="${doc.id}" data-asg="${assign.assign_id}">📨 Cập nhật Tiến độ &amp; Phản hồi</button>
                 <button type="button" class="btn btn-success btn-submit-done" data-doc="${doc.id}" data-asg="${assign.assign_id}">✅ Báo cáo Hoàn thành (100%)</button>
-              </div>
-            ` : `<div style="font-size:0.8rem; color:#15803d; font-weight:700;">✅ Nhiệm vụ này đã được Lãnh đạo duyệt hoàn thành.</div>`}
+              </div>`;
+            })() : `<div style="font-size:0.8rem; color:#15803d; font-weight:700;">✅ Nhiệm vụ này đã được Lãnh đạo duyệt hoàn thành.</div>`}
           </div>
         </article>
       `;
@@ -657,7 +701,62 @@
 
   el.btnFlushOutbox.addEventListener('click', () => flushOutbox(false));
 
+  // Lưu bản nháp tức thì khi cán bộ đang gõ hoặc kéo thanh tiến độ (CHỐNG TỰ XÓA CHỮ 100%)
+  el.tasksContainer.addEventListener('input', (e) => {
+    const t = e.target;
+    const asgId = t.getAttribute('data-asg');
+    if (!asgId) return;
+    state.drafts[asgId] = state.drafts[asgId] || {};
+    if (t.classList.contains('draft-msg')) {
+      state.drafts[asgId].message = t.value;
+    } else if (t.classList.contains('draft-range')) {
+      state.drafts[asgId].progress_pct = Number(t.value);
+    }
+  });
+
+  // Đọc tệp báo cáo đính kèm (<= 650KB gửi trực tiếp cả LAN & Firebase Cloud 24/7)
+  el.tasksContainer.addEventListener('change', (e) => {
+    const inp = e.target;
+    if (!inp.classList.contains('draft-file-input')) return;
+    const asgId = inp.getAttribute('data-asg');
+    const file = inp.files && inp.files[0];
+    if (!asgId || !file) return;
+    const maxBytes = 650 * 1024;
+    if (file.size > maxBytes) {
+      showToast('⚠️ Tệp vượt quá 650 KB — vui lòng nén gọn hoặc dán link Google Drive vào ô nội dung báo cáo!');
+      inp.value = '';
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const kb = Math.max(1, Math.round(file.size / 1024)) + ' KB';
+      state.drafts[asgId] = state.drafts[asgId] || {};
+      state.drafts[asgId].attachment_name = file.name;
+      state.drafts[asgId].attachment_size = kb;
+      state.drafts[asgId].attachment_data = String(reader.result || '');
+      const chip = document.getElementById(`attChip_${asgId}`);
+      const nameEl = document.getElementById(`attName_${asgId}`);
+      if (nameEl) nameEl.textContent = `📎 ${file.name} (${kb})`;
+      if (chip) chip.style.display = 'inline-flex';
+      showToast(`📎 Đã đính kèm tệp báo cáo: ${file.name}`);
+    };
+    reader.readAsDataURL(file);
+  });
+
   el.tasksContainer.addEventListener('click', (e) => {
+    const clearBtn = e.target.closest('.btn-clear-att');
+    if (clearBtn) {
+      const asgId = clearBtn.getAttribute('data-asg');
+      if (asgId && state.drafts[asgId]) {
+        delete state.drafts[asgId].attachment_name;
+        delete state.drafts[asgId].attachment_size;
+        delete state.drafts[asgId].attachment_data;
+      }
+      const chip = document.getElementById(`attChip_${asgId}`);
+      if (chip) chip.style.display = 'none';
+      return;
+    }
+
     const btn = e.target.closest('button');
     if (!btn) return;
     const docId = btn.getAttribute('data-doc');
@@ -682,11 +781,13 @@
   });
   window.addEventListener('offline', () => updateNetPill(false));
 
-  // Tự kiểm tra đồng bộ định kỳ mỗi 15 giây
+  // Tự kiểm tra đồng bộ định kỳ mỗi 15 giây — TUYỆT ĐỐI KHÔNG VẼ LẠI KHI CÁN BỘ ĐANG GÕ CHỮ HOẶC CÓ BẢN NHÁP!
   setInterval(() => {
     if (navigator.onLine) {
       flushOutbox(true);
-      if (state.currentUser) loadAssignedDocs();
+      if (state.currentUser && !isUserEditingTasks()) {
+        loadAssignedDocs();
+      }
     }
   }, 15000);
 
