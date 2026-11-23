@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
@@ -139,8 +139,8 @@
     <div class="brand-row">
       <img src="app_icon.png" alt="Logo QLCV">
       <div>
-        <h1>CỔNG PHÒNG BAN &amp; CÁN BỘ XỬ LÝ CÔNG VĂN</h1>
-        <p>Hệ Thống Quản Lý Công Văn Số — Thầy Nguyễn Tá Quan • PWA Offline + Cloud 24/7</p>
+        <h1>CỔNG PHÒNG BAN &amp; CÁN BỘ XỬ LÝ CÔNG VĂN <span style="display:inline-block; background:rgba(250,204,21,0.22); color:#fde047; border:1px solid rgba(250,204,21,0.5); font-size:0.72rem; padding:1px 7px; border-radius:999px; vertical-align:middle; margin-left:4px;">v2.5</span></h1>
+        <p>Hệ Thống Quản Lý Công Văn Số — PWA Offline + Cloud 24/7 • Phiên bản chuẩn v2.5 (23/11/2026)</p>
       </div>
     </div>
     <div class="header-right">
@@ -199,6 +199,7 @@
 
   <div id="staffToast" class="toast"></div>
 
+  <script src="./unit_config.js"></script>
   <script>
 /**
  * CỔNG PHÒNG BAN & CÁN BỘ XỬ LÝ CÔNG VĂN (PWA OFFLINE-FIRST + HYBRID LAN & FIREBASE CLOUD)
@@ -208,9 +209,10 @@
  */
 
 (function () {
-  // Cấu hình Firebase độc lập cho riêng hệ thống QLCV (tách biệt hoàn toàn khỏi EDUSTO)
-  const FIREBASE_PROJECT = 'qlcv-truonghoc';
-  const FIREBASE_API_KEY = 'AIzaSyCjguQAmgsNCKjevtrTiYHKDc_OgduV-t8';
+  // Đọc cấu hình Cloud độc lập từ unit_config.js (nếu có) -> giúp cập nhật index.html không bao giờ mất khóa của đơn vị!
+  const UNIT_CFG = (typeof window !== 'undefined' && window.QLCV_UNIT_CONFIG) ? window.QLCV_UNIT_CONFIG : {};
+  const FIREBASE_PROJECT = UNIT_CFG.firebaseProject || 'qlcv-truonghoc';
+  const FIREBASE_API_KEY = UNIT_CFG.firebaseApiKey || 'AIzaSyCjguQAmgsNCKjevtrTiYHKDc_OgduV-t8';
   const FS_BASE = FIREBASE_PROJECT
     ? `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT}/databases/(default)/documents`
     : '';
@@ -603,7 +605,8 @@
             ${escapeHtml(assign.directive || 'Thực hiện theo nội dung văn bản.')}
           </div>
 
-          ${doc.summary ? `<div class="summary-box"><strong>📋 Tóm tắt nội dung:</strong><br>${escapeHtml(doc.summary).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>')}</div>` : ''}
+          ${doc.summary ? `<div class="summary-box"><strong>📋 Tóm tắt nội dung:</strong><br>${escapeHtml(doc.summary).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/
+/g, '<br>')}</div>` : ''}
 
           ${responses.length ? `
             <div class="response-history">
@@ -807,7 +810,7 @@
   })();
 })();
 
-</script>
+  </script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
@@ -817,4 +820,3 @@
   </script>
 </body>
 </html>
-
