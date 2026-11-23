@@ -605,8 +605,7 @@
             ${escapeHtml(assign.directive || 'Thực hiện theo nội dung văn bản.')}
           </div>
 
-          ${doc.summary ? `<div class="summary-box"><strong>📋 Tóm tắt nội dung:</strong><br>${escapeHtml(doc.summary).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/
-/g, '<br>')}</div>` : ''}
+          ${doc.summary ? `<div class="summary-box"><strong>📋 Tóm tắt nội dung:</strong><br>${escapeHtml(doc.summary).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>')}</div>` : ''}
 
           ${responses.length ? `
             <div class="response-history">
