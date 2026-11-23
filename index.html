@@ -645,7 +645,7 @@
                 </span>
               </div>
               <div class="btn-row">
-                ${assign.status === 'sent' ? `<button type="button" class="btn btn-outline btn-mark-seen" data-doc="${doc.id}" data-asg="${assign.assign_id}">👀 Xác nhận đã nhận</button>` : ''}
+                ${(assign.status === 'sent' || assign.status === 'returned') ? `<button type="button" class="btn btn-outline btn-mark-seen" data-doc="${doc.id}" data-asg="${assign.assign_id}" data-st="${assign.status}">👀 Xác nhận đã tiếp nhận yêu cầu</button>` : ''}
                 <button type="button" class="btn btn-primary btn-send-progress" data-doc="${doc.id}" data-asg="${assign.assign_id}">📨 Cập nhật Tiến độ &amp; Phản hồi</button>
                 <button type="button" class="btn btn-success btn-submit-done" data-doc="${doc.id}" data-asg="${assign.assign_id}">✅ Báo cáo Hoàn thành (100%)</button>
               </div>`;
@@ -766,7 +766,11 @@
     const msg = document.getElementById(`msgBox_${asgId}`)?.value || '';
 
     if (btn.classList.contains('btn-mark-seen')) {
-      submitStaffAction(docId, asgId, 'seen', Math.max(10, Number(pct)), msg || 'Đã tiếp nhận văn bản và đang triển khai.');
+      const prevSt = btn.getAttribute('data-st');
+      const defaultSeenMsg = prevSt === 'returned'
+        ? 'Đã tiếp nhận yêu cầu bổ sung / làm lại và đang triển khai.'
+        : 'Đã tiếp nhận văn bản và đang triển khai.';
+      submitStaffAction(docId, asgId, 'seen', Math.max(10, Number(pct)), msg || defaultSeenMsg);
     } else if (btn.classList.contains('btn-send-progress')) {
       submitStaffAction(docId, asgId, 'in_progress', Math.max(10, Number(pct)), msg || `Cập nhật tiến độ xử lý: ${pct}%.`);
     } else if (btn.classList.contains('btn-submit-done')) {
